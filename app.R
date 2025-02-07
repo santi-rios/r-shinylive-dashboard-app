@@ -1,155 +1,175 @@
-## Based on the Quarto Dashboard for Earthquakes available here:
-## https://raw.githubusercontent.com/cwickham/quakes/main/quakes.qmd
-
-# Load libraries for Shiny app and styling
 library(shiny)
 library(bslib)
-library(bsicons)
-
-# Load analysis libraries
 library(tidyverse)
-# library(httr2) # Custom shim
-library(sf)
-library(leaflet)
-library(gt)
+library(plotly)
 
-
-# Custom shim to avoid httr2 functionality
-shim_request = function(endpoint = "https://api.geonet.org.nz/quake?MMI=3") {
+######### Data Preparation #########
+read_figuras <- function(directory) {
+  files <- list.files(directory, pattern = "^Figure1.*\\.tsv$", full.names = TRUE)
   
-  readLines(url(endpoint)) |>
-    sf::st_read(quiet = TRUE)
+  data_list <- lapply(files, function(file) {
+    read_tsv(file) %>%
+      pivot_longer(cols = -Country, names_to = "Year", values_to = "Value") %>%
+      mutate(Year = as.numeric(Year),
+             source = tools::file_path_sans_ext(basename(file)))
+  })
+  
+  bind_rows(data_list)
 }
 
-recent_quakes_data <- shim_request()
+df <- read_figuras("data/")
 
-# Obtain data
-recent_quakes <- recent_quakes_data |> 
-  arrange(desc(time)) |> 
-  mutate(
-    time = force_tz(time, "Pacific/Auckland"),
-    pretty_time = format(time, "%I:%M %p"),
-    days_ago = today(tzone = "Pacific/Auckland") - date(time),
-    days_ago = case_when(
-      days_ago == 0 ~ "Today",
-      days_ago == 1 ~ "Yesterday",
-      TRUE ~ paste0(days_ago, " days ago")
-    )
-  )
+######### Animation Function #########
+accumulate_by <- function(dat, var) {
+  var <- rlang::ensym(var)
+  lvls <- sort(unique(dat[[var]]))
+  dats <- lapply(lvls, function(x) {
+    dat %>% filter(!!var <= x) %>% mutate(frame = x)
+  })
+  bind_rows(dats)
+}
 
-now_nz <- now(tzone = "Pacific/Auckland")
-last_24 <- recent_quakes |> filter(time > (now_nz - hours(24)))
-n_24 <- nrow(last_24)
-hours_last <- round(difftime(now_nz, recent_quakes$time[1], units = "hours"))
-
-mag_pal <- colorBin("inferno", domain = 1:8, bins = c(0:5, 8))
-
-quake_map <- recent_quakes |> 
-  leaflet() |> 
-  addCircleMarkers(
-    color = ~ mag_pal(magnitude),
-    stroke = FALSE,
-    fillOpacity = 0.5,
-    radius = ~ scales::rescale(sqrt(magnitude), c(1, 10)),
-    label = ~ paste(
-      date(time), pretty_time, "<br/>",
-      "Magnitude:", round(magnitude, 1), "<br/>", 
-      "Depth:",  round(depth), " km"
-    ) |> map(html),
-    labelOptions = c(textsize = "15px")) |> 
-  addLegend(title = "Magnitude", colors = mag_pal(0:5), labels = c("<1", 1:4,">5")) |> 
-  addTiles("http://services.arcgisonline.com/arcgis/rest/services/Canvas/World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}", options = tileOptions(minZoom = 5, maxZoom = 10)) 
-
-
-mag_hist <- recent_quakes |> 
-  ggplot(aes(x = magnitude)) +
-  geom_histogram()
-
-timeline <- recent_quakes |> 
-  ggplot(aes(x = time, y = 0)) +
-  geom_point()
-
-
-# Create n most recent table
-n <- 10
-top_n <- recent_quakes |> 
-  slice(1:n) |> 
-  as.data.frame() |> 
-  select(magnitude, days_ago, pretty_time, locality, depth) 
-
-top_n_table <- top_n |> 
-  gt() |> 
-  cols_label(
-    days_ago = "",
-    locality = "Location",
-    magnitude = "Magnitude",
-    depth = "Depth",
-    pretty_time = ""
-  ) |> 
-  fmt_integer(
-    columns = depth, 
-    pattern = "{x} km"
-  ) |> 
-  fmt_number(
-    columns = magnitude,
-    decimals = 1
-  ) |> 
-  data_color(
-    columns = "magnitude",
-    fn = mag_pal
-  ) |>
-  tab_header(
-    title = md("**Last 10 Earthquakes**")
-  ) |> 
-  tab_source_note(
-    source_note = md(
-      paste(
-        "Retrieved from the [GeoNet API](https://api.geonet.org.nz/) at",
-        format(now_nz, "%Y/%m/%d %H:%M %Z")
-      )
-    )
-  )
-
+######### APP #########
 ui <- page_fluid(
-  theme = bs_theme(bootswatch = "yeti"),
+  theme = bs_theme(bootswatch = "flatly"),
   div(
     class = "navbar navbar-static-top primary bg-primary",
-    div("Recent Earthquakes in Aotearoa New Zealand", class = "container-fluid")
+    div("China's rise in the chemical space and the decline of US influence", class = "container-fluid")
   ),
   br(),
-  layout_column_wrap(
-    height = 1000,
-    layout_columns(
-      col_widths = c(6, 6, 16),
-      row_heights = c(1, 5),
-      value_box(
-          title = "Hours since last earthquake",
-          value = as.numeric(hours_last),
-          showcase = bs_icon("stopwatch"),
-          theme = "primary"
-        ),
-      value_box(
-        title = "Earthquakes in the last 24 hours",
-        value = n_24,
-        showcase = bs_icon("activity"),
-        theme = "secondary"
-      ),
-      card(
-        full_screen = TRUE,
-        top_n_table
-      ),
+  layout_columns(
+    col_widths = c(3, 9),  # 25% controls, 75% plot
+    card(
+      card_header("Controls"),
+      card_body(
+        selectInput("facet", "Select  figure:",
+                    choices = unique(df$source),
+                    selected = "Figure1a",
+                    width = "100%"),
+        selectInput("countries", "Choose Countries or delete with delete key in keyboard:",
+                    choices = NULL,
+                    selected = NULL,
+                    multiple = TRUE,
+                    width = "100%"),
+        uiOutput("figure_description")
+      )
     ),
     card(
       full_screen = TRUE,
-      min_height = 800,
-      card_header("100 Most Recent Earthquakes"),
-      card_body(quake_map)
+      card_header("Figure 1"),
+      card_body(
+        plotlyOutput("emissionsPlot", height = "75vh")
+      )
     )
-  )
+  ),
+  br(),
+    div(
+        class = "navbar navbar-static-bottom bg-light",
+        div(
+        class = "container-fluid",
+        "Data taken from the article Bermudez-Montana, Garcia-Chung, et al, 2025: ",
+        a("https://doi.org/10.26434/chemrxiv-2025-d2zc8", href = "https://chemrxiv.org/engage/chemrxiv/article-details/67920ada6dde43c908f688f6")
+        )
+    )
 )
 
-# Disable server functionality
-server <- function(input, output) {}
+server <- function(input, output) {
+  # Dynamic country selection based on dataset
+  observeEvent(input$facet, {
+    countries <- df %>% 
+      dplyr::filter(source == input$facet) %>% 
+      dplyr::pull(Country) %>% 
+      unique()
+    
+    updateSelectInput(inputId = "countries", 
+                      choices = countries,
+                      selected = head(countries, 4))
+  })
+
+  # Figure description text
+  output$figure_description <- renderUI({
+    req(input$facet)
+    desc_text <- case_when(
+      input$facet == "Figure1a" ~ "Countrywise expansion of the chemical space, Country participation in the growth of the CS",
+      input$facet == "Figure1b" ~ "Eight most relevant international collaborations in the CS",
+      input$facet == "Figure1c" ~ "Percentage of new substances with participation of country, is either China or the US, resulting from China-US collaboration",
+      input$facet == "Figure1d" ~ "Percentage of the annual growth rate of the gross domestic product (GDP) per capita.6 Two important economic events are highlighted: the 2007/2008 Global Financial Crisis and the COVID pandemic (2020)",
+      input$facet == "Figure1e" ~ "Number of researchers in research and development activities (SI)",
+      TRUE ~ paste("Displaying:", input$facet)
+    )
+    div(class = "text-muted", style = "margin-bottom: 15px;", desc_text)
+  })
+  
+  # Main plot
+  output$emissionsPlot <- renderPlotly({
+    req(input$countries, input$facet)
+    
+    filtered_data <- df %>% 
+      filter(Country %in% input$countries, 
+             source == input$facet) %>% 
+      dplyr::arrange(Year)
+    
+    if (nrow(filtered_data) == 0) return(plotly_empty())
+    
+    animated_data <- accumulate_by(filtered_data, Year)
+    
+    # Create base plot
+    fig <- animated_data %>%
+      plot_ly(
+        x = ~Year,
+        y = ~Value,
+        color = ~Country,
+        frame = ~frame,
+        type = 'scatter',
+        mode = 'lines',
+        line = list(simplify = FALSE, width = 2),
+        hoverinfo = 'text',
+        text = ~paste("Country:", Country, "<br>Year:", Year, "<br>Value:", round(Value, 2))
+      )
+    
+    # Add country annotations at final frame
+    final_data <- filtered_data %>% 
+      group_by(Country) %>% 
+      filter(Year == max(Year)) %>% 
+      ungroup()
+    
+    for(i in 1:nrow(final_data)) {
+      fig <- fig %>% add_annotations(
+        x = final_data$Year[i],
+        y = final_data$Value[i],
+        text = final_data$Country[i],
+        xref = "x",
+        yref = "y",
+        xanchor = 'left',
+        yanchor = 'middle',
+        showarrow = FALSE,
+        # font = list(color = plotly:::toRGB(final_data$Country[i]), size = 12),
+        xshift = 10
+      )
+    }
+    
+    # Layout configuration
+    fig %>% layout(
+      title = paste("Countrywise expansion of the chemical space -", input$facet),
+      xaxis = list(title = "Year", range = c(1995, 2023)),
+      yaxis = list(title = "Value"),
+      hovermode = "x unified",
+      legend = list(orientation = "h", y = -0.2),
+      margin = list(r = 40)  # Add right margin for annotations
+    ) %>%
+    animation_opts(
+      frame = 300, 
+      transition = 100,
+      redraw = FALSE,
+      mode = "afterall"
+    ) %>%
+    animation_slider(
+      currentvalue = list(font = list(color = "black"))
+    ) %>%
+    animation_button(
+      x = 1, xanchor = "right", y = 0, yanchor = "bottom"
+    )
+  })
+}
 
 shinyApp(ui, server)
-
